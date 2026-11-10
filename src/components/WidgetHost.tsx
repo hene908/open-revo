@@ -12,6 +12,7 @@ interface WidgetHostProps {
 }
 
 export const WidgetHost: React.FC<WidgetHostProps> = ({ pluginId }) => {
+  const [loading, setLoading] = useState(true);
   const [customHtml, setCustomHtml] = useState<string | null>(null);
   const [hasCustomPlugin, setHasCustomPlugin] = useState(false);
 
@@ -72,7 +73,7 @@ export const WidgetHost: React.FC<WidgetHostProps> = ({ pluginId }) => {
   // 2. Load custom plugin HTML
   const fetchCustomHtml = async () => {
     try {
-      const html = await invoke<string>('load_plugin_html', { pluginId });
+      const html = await invoke<string>('load_plugin_html', { pluginId, surface: 'widget' });
       if (html && html.trim().length > 0) {
         setCustomHtml(html);
         setHasCustomPlugin(true);
@@ -83,6 +84,7 @@ export const WidgetHost: React.FC<WidgetHostProps> = ({ pluginId }) => {
       // If plugin does not contain custom index.html/entry, fallback smoothly to built-in S2 core
       setHasCustomPlugin(false);
     } finally {
+      setLoading(false);
       try {
         await invoke('widget_ready', { pluginId });
       } catch (_) {}
@@ -93,7 +95,20 @@ export const WidgetHost: React.FC<WidgetHostProps> = ({ pluginId }) => {
     fetchCustomHtml();
   }, [pluginId]);
 
-  // 3. Fallback heartbeat & telemetry sync
+  // 3. Register telemetry consumer for current widget
+  useEffect(() => {
+    invoke('register_telemetry_consumer', {
+      consumerId: pluginId,
+      sensors: ['cpu_temp', 'gpu_temp', 'cpu_power', 'gpu_power', 'fps', 'cpu_fan_rpm', 'gpu_fan_rpm', 'battery_level'],
+    }).catch(() => {});
+    return () => {
+      invoke('unregister_telemetry_consumer', {
+        consumerId: pluginId,
+      }).catch(() => {});
+    };
+  }, [pluginId]);
+
+  // 4. Fallback heartbeat & telemetry sync
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let timer: any;
@@ -158,6 +173,14 @@ export const WidgetHost: React.FC<WidgetHostProps> = ({ pluginId }) => {
             break;
           case 'CLOSE_WIDGET':
             await invoke('close_custom_widget', { pluginId });
+            break;
+          case 'EMIT':
+            if (payload?.event) {
+              await invoke('emit_plugin_broadcast', {
+                event: payload.event,
+                payload: payload.payload ?? null,
+              });
+            }
             break;
           default:
             break;
@@ -234,6 +257,12 @@ export const WidgetHost: React.FC<WidgetHostProps> = ({ pluginId }) => {
   }
 }
 </script>
+<style id="openrevo-transparent-canvas">
+html, body {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+</style>
 `;
 
     // Inject into head, or prepend if no head
@@ -289,6 +318,10 @@ export const WidgetHost: React.FC<WidgetHostProps> = ({ pluginId }) => {
     } catch (_) {}
   };
 
+  if (loading) {
+    return <div style={{ width: '100vw', height: '100vh', background: 'transparent' }} />;
+  }
+
   // If user has custom HTML, render the custom iframe
   if (hasCustomPlugin && preparedHtml) {
     return (
@@ -307,11 +340,14 @@ export const WidgetHost: React.FC<WidgetHostProps> = ({ pluginId }) => {
           srcDoc={preparedHtml}
           title={`widget-${pluginId}`}
           sandbox="allow-scripts allow-forms allow-same-origin allow-modals"
+          // @ts-ignore
+          allowTransparency="true"
           style={{
             width: '100%',
             height: '100%',
             border: 'none',
             background: 'transparent',
+            backgroundColor: 'transparent',
             display: 'block',
           }}
           onLoad={() => {

@@ -11,6 +11,22 @@ pub fn register(window: &MainWindow, ui_weak: slint::Weak<MainWindow>) {
     });
 
     let ui_cb = ui_weak.clone();
+    window.on_bld_fan_lock_toggled(move |rpm| {
+        ipc::send_action_to_host("toggle_bld_fan_lock", serde_json::json!({ "rpm": rpm }));
+        if let Some(ui) = ui_cb.upgrade() {
+            ui.set_fan_boost(!ui.get_fan_boost());
+        }
+    });
+
+    let ui_cb = ui_weak.clone();
+    window.on_bld_fan_rpm_changed(move |rpm| {
+        if let Some(ui) = ui_cb.upgrade() {
+            ui.set_bld_fan_rpm(rpm);
+        }
+        ipc::send_action_to_host("set_bld_fan_rpm", serde_json::json!({ "rpm": rpm }));
+    });
+
+    let ui_cb = ui_weak.clone();
     window.on_camera_toggled(move || {
         ipc::send_action_to_host("toggle_camera", serde_json::json!({}));
         if let Some(ui) = ui_cb.upgrade() {
@@ -98,8 +114,14 @@ pub fn register(window: &MainWindow, ui_weak: slint::Weak<MainWindow>) {
         }
     });
 
+    let ui_oem = ui_weak.clone();
     window.on_oem_toggled(move || {
-        ipc::send_action_to_host("toggle_oem", serde_json::json!({}));
+        let cur_running = if let Some(ui) = ui_oem.upgrade() {
+            ui.get_oem_running()
+        } else {
+            false
+        };
+        ipc::send_action_to_host("toggle_oem", serde_json::json!({ "take_over": !cur_running }));
     });
 
     // GPU Boost Handlers

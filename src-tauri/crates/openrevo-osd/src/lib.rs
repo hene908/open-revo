@@ -115,17 +115,79 @@ fn find_thread_hwnd() -> Option<HWND> {
     }
 }
 
-fn calculate_osd_position(position_str: &str, win_width: i32, win_height: i32) -> (i32, i32) {
-    let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-    let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+fn get_window_dpi_scale(hwnd: HWND) -> f32 {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetDpiForWindow(hwnd: HWND) -> u32;
+    }
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    if dpi > 0 {
+        dpi as f32 / 96.0
+    } else {
+        1.0
+    }
+}
 
-    match position_str {
-        "top-left" | "left" => (36, 42),
-        "top-right" | "right" => (screen_w - win_width - 36, 42),
-        "bottom-center" | "bottom" => ((screen_w - win_width) / 2, screen_h - win_height - 72),
-        "bottom-left" => (36, screen_h - win_height - 72),
-        "center" => ((screen_w - win_width) / 2, (screen_h - win_height) / 2),
-        _ => ((screen_w - win_width) / 2, 42), // Default "top-center"
+fn get_monitor_bounds(hwnd: HWND) -> (i32, i32, i32, i32) {
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    unsafe {
+        let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if !hmon.is_invalid() {
+            let mut mi = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+                let r = mi.rcMonitor;
+                return (r.left, r.top, r.right - r.left, r.bottom - r.top);
+            }
+        }
+        (0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN))
+    }
+}
+
+fn calculate_osd_position(hwnd: HWND, position_str: &str, win_width: i32, win_height: i32) -> (i32, i32) {
+    let dpi_scale = get_window_dpi_scale(hwnd);
+    let (mon_x, mon_y, screen_w, screen_h) = get_monitor_bounds(hwnd);
+
+    let w = if win_width > 0 { win_width } else { (640.0 * dpi_scale).round() as i32 };
+    let h = if win_height > 0 { win_height } else { (130.0 * dpi_scale).round() as i32 };
+
+    let margin_x = (36.0 * dpi_scale).round() as i32;
+    let margin_top = (36.0 * dpi_scale).round() as i32;
+    let margin_bottom = (70.0 * dpi_scale).round() as i32;
+
+    let (rel_x, rel_y) = match position_str {
+        "top-center" => ((screen_w - w) / 2, margin_top),
+        "top-right" | "right" => (screen_w - w - margin_x, margin_top),
+        "bottom-center" | "bottom" => ((screen_w - w) / 2, screen_h - h - margin_bottom),
+        "bottom-left" => (margin_x, screen_h - h - margin_bottom),
+        "center" => ((screen_w - w) / 2, (screen_h - h) / 2),
+        _ => (margin_x, margin_top), // Default: "top-left"
+    };
+
+    (mon_x + rel_x, mon_y + rel_y)
+}
+
+fn reposition_osd_window(hwnd: HWND, position_str: &str) {
+    unsafe {
+        let mut rect = RECT::default();
+        let _ = GetWindowRect(hwnd, &mut rect);
+        let win_width = rect.right - rect.left;
+        let win_height = rect.bottom - rect.top;
+
+        let (x, y) = calculate_osd_position(hwnd, position_str, win_width, win_height);
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOACTIVATE,
+        );
     }
 }
 
@@ -165,7 +227,7 @@ pub fn apply_osd_window_styles(hwnd: HWND, position_str: &str) {
         let win_width = rect.right - rect.left;
         let win_height = rect.bottom - rect.top;
 
-        let (x, y) = calculate_osd_position(position_str, win_width, win_height);
+        let (x, y) = calculate_osd_position(hwnd, position_str, win_width, win_height);
 
         // Crucial: SWP_FRAMECHANGED forces Windows DWM to discard and recalculate non-client caption bar!
         let _ = SetWindowPos(
@@ -183,17 +245,80 @@ pub fn apply_osd_window_styles(hwnd: HWND, position_str: &str) {
 }
 
 
+#[derive(Debug, Clone)]
+pub struct OsdPalette {
+    pub office: Color,
+    pub balance: Color,
+    pub beast: Color,
+    pub geek: Color,
+    pub fan: Color,
+    pub enabled: Color,
+    pub disabled: Color,
+    pub neutral: Color,
+}
+
+impl Default for OsdPalette {
+    fn default() -> Self {
+        Self {
+            office: Color::from(RgbaColor { red: 16, green: 185, blue: 129, alpha: 255 }),
+            balance: Color::from(RgbaColor { red: 6, green: 182, blue: 212, alpha: 255 }),
+            beast: Color::from(RgbaColor { red: 239, green: 68, blue: 68, alpha: 255 }),
+            geek: Color::from(RgbaColor { red: 168, green: 85, blue: 247, alpha: 255 }),
+            fan: Color::from(RgbaColor { red: 56, green: 189, blue: 248, alpha: 255 }),
+            enabled: Color::from(RgbaColor { red: 16, green: 185, blue: 129, alpha: 255 }),
+            disabled: Color::from(RgbaColor { red: 239, green: 68, blue: 68, alpha: 255 }),
+            neutral: Color::from(RgbaColor { red: 148, green: 163, blue: 184, alpha: 255 }),
+        }
+    }
+}
+
+fn parse_hex_color(hex: &str) -> Option<Color> {
+    let s = hex.trim().strip_prefix('#')?;
+    if s.len() == 6 {
+        let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+        Some(Color::from_rgb_u8(r, g, b))
+    } else if s.len() == 8 {
+        let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+        let a = u8::from_str_radix(&s[6..8], 16).ok()?;
+        Some(Color::from_argb_u8(a, r, g, b))
+    } else {
+        None
+    }
+}
+
+fn with_alpha(c: Color, alpha: u8) -> Color {
+    let rgba = c.to_argb_u8();
+    Color::from(RgbaColor { red: rgba.red, green: rgba.green, blue: rgba.blue, alpha })
+}
+
+fn current_palette() -> OsdPalette {
+    OSD_STATE
+        .get()
+        .and_then(|s| s.palette.lock().ok().map(|p| p.clone()))
+        .unwrap_or_default()
+}
+
 #[allow(dead_code)]
 struct OsdGlobalState {
     window: slint::Weak<OsdWindow>,
     hwnd: Arc<Mutex<Option<SafeHwnd>>>,
     config: Arc<Mutex<NativeOsdConfig>>,
+    palette: Arc<Mutex<OsdPalette>>,
 }
 
 static OSD_STATE: OnceLock<OsdGlobalState> = OnceLock::new();
 
 fn reveal_osd_window(hwnd_opt: Option<SafeHwnd>) {
     if let Some(safe_hwnd) = hwnd_opt {
+        let pos = OSD_STATE
+            .get()
+            .and_then(|s| s.config.lock().ok().map(|c| c.position.clone()))
+            .unwrap_or_else(|| "top-left".to_string());
+        reposition_osd_window(safe_hwnd.as_hwnd(), &pos);
         unsafe {
             let _ = ShowWindow(safe_hwnd.as_hwnd(), SW_SHOWNOACTIVATE);
             let _ = SetWindowPos(
@@ -332,11 +457,65 @@ pub fn handle_ipc_message(
                 if let Some(ui) = weak.upgrade() {
                     ui.set_osd_theme(theme.into());
                     ui.set_osd_scale(scale_factor);
+                    ui.set_osd_position(position.clone().into());
                     if let Some(safe_hwnd) = *hwnd_cloned.lock().unwrap() {
                         apply_osd_window_styles(safe_hwnd.as_hwnd(), &position);
                     }
                 }
             });
+        }
+        "theme_tokens" => {
+            if let Some(tokens) = val.get("tokens").cloned() {
+                if let Some(state) = OSD_STATE.get() {
+                    if let Ok(mut pal) = state.palette.lock() {
+                        if let Some(c) = tokens.get("mode_office").and_then(|v| v.as_str()).and_then(parse_hex_color) {
+                            pal.office = c;
+                            pal.enabled = c;
+                        }
+                        if let Some(c) = tokens.get("mode_balance").and_then(|v| v.as_str()).and_then(parse_hex_color) {
+                            pal.balance = c;
+                        }
+                        if let Some(c) = tokens.get("mode_beast").and_then(|v| v.as_str()).and_then(parse_hex_color) {
+                            pal.beast = c;
+                            pal.disabled = c;
+                        }
+                        if let Some(c) = tokens.get("accent_brand").and_then(|v| v.as_str()).and_then(parse_hex_color) {
+                            pal.geek = c;
+                        }
+                        if let Some(c) = tokens.get("accent_fan").and_then(|v| v.as_str()).and_then(parse_hex_color) {
+                            pal.fan = c;
+                        }
+                        if let Some(c) = tokens.get("text_muted").and_then(|v| v.as_str()).and_then(parse_hex_color) {
+                            pal.neutral = c;
+                        }
+                    }
+                }
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        if let Some(ff) = tokens.get("font_family").and_then(|v| v.as_str()) {
+                            ui.set_font_family(ff.into());
+                        }
+                        if let Some(c) = tokens.get("surface_elevated").and_then(|v| v.as_str()).and_then(parse_hex_color) {
+                            let rgba = c.to_argb_u8();
+                            ui.set_card_bg_color(Color::from(RgbaColor {
+                                red: rgba.red,
+                                green: rgba.green,
+                                blue: rgba.blue,
+                                alpha: if rgba.alpha == 255 { 242 } else { rgba.alpha },
+                            }));
+                        }
+                        if let Some(c) = tokens.get("text_primary").and_then(|v| v.as_str()).and_then(parse_hex_color) {
+                            ui.set_text_primary_color(c);
+                        }
+                        if let Some(r) = tokens.get("radius_sm").and_then(|v| v.as_f64()) {
+                            ui.set_custom_radius_sm(r as f32);
+                        }
+                        if let Some(r) = tokens.get("radius_md").and_then(|v| v.as_f64()) {
+                            ui.set_custom_radius_md(r as f32);
+                        }
+                    }
+                });
+            }
         }
         "quit" | "shutdown" | "exit" => {
             std::process::exit(0);
@@ -348,190 +527,155 @@ pub fn handle_ipc_message(
 
 
 fn show_power_mode_internal(ui: &OsdWindow, mode: u8) {
-    let (title, subtitle, icon, color, bg) = match mode {
-        1 => (
-            "办公模式",
-            "OFFICE MODE · 极致静音与续航优先",
-            "🌱",
-            Color::from(RgbaColor { red: 16, green: 185, blue: 129, alpha: 255 }),
-            Color::from(RgbaColor { red: 16, green: 185, blue: 129, alpha: 35 }),
-        ),
-        2 => (
-            "均衡模式",
-            "BALANCE MODE · 日常智能高能效调度",
-            "⚖️",
-            Color::from(RgbaColor { red: 6, green: 182, blue: 212, alpha: 255 }),
-            Color::from(RgbaColor { red: 6, green: 182, blue: 212, alpha: 35 }),
-        ),
-        3 => (
-            "狂暴模式",
-            "BEAST MODE · 极致性能与功耗全开",
-            "⚡",
-            Color::from(RgbaColor { red: 239, green: 68, blue: 68, alpha: 255 }),
-            Color::from(RgbaColor { red: 239, green: 68, blue: 68, alpha: 35 }),
-        ),
-        _ => (
-            "极客调校",
-            "CUSTOM MODE · 深度功耗与温控曲线",
-            "💧",
-            Color::from(RgbaColor { red: 168, green: 85, blue: 247, alpha: 255 }),
-            Color::from(RgbaColor { red: 168, green: 85, blue: 247, alpha: 35 }),
-        ),
+    let pal = current_palette();
+    let (title, icon, color) = match mode {
+        1 => ("办公模式", "🌱", pal.office),
+        2 => ("均衡模式", "⚖️", pal.balance),
+        3 => ("狂暴模式", "⚡", pal.beast),
+        _ => ("极客调校", "💧", pal.geek),
     };
 
     ui.set_mode_title(title.into());
-    ui.set_mode_subtitle(subtitle.into());
     ui.set_icon_symbol(icon.into());
     ui.set_accent_color(color);
-    ui.set_accent_bg(bg);
+    ui.set_accent_bg(with_alpha(color, 35));
     ui.set_is_active(true);
 }
 
 fn show_fan_boost_internal(ui: &OsdWindow, enabled: bool) {
-    let (title, subtitle, icon, color, bg) = if enabled {
-        (
-            "强冷模式 开启",
-            "FAN BOOST: ON · 双风扇满载高速运转",
-            "🌪️",
-            Color::from(RgbaColor { red: 56, green: 189, blue: 248, alpha: 255 }),
-            Color::from(RgbaColor { red: 56, green: 189, blue: 248, alpha: 35 }),
-        )
+    let pal = current_palette();
+    let (title, icon, color) = if enabled {
+        ("强冷模式 开启", "🌪️", pal.fan)
     } else {
-        (
-            "强冷模式 关闭",
-            "FAN BOOST: OFF · 恢复智能温控策略",
-            "💨",
-            Color::from(RgbaColor { red: 148, green: 163, blue: 184, alpha: 255 }),
-            Color::from(RgbaColor { red: 148, green: 163, blue: 184, alpha: 35 }),
-        )
+        ("强冷模式 关闭", "💨", pal.neutral)
     };
 
     ui.set_mode_title(title.into());
-    ui.set_mode_subtitle(subtitle.into());
     ui.set_icon_symbol(icon.into());
     ui.set_accent_color(color);
-    ui.set_accent_bg(bg);
+    ui.set_accent_bg(with_alpha(color, 35));
     ui.set_is_active(true);
 }
 
 fn show_key_lock_toast_internal(ui: &OsdWindow, name: &str, locked: bool) {
-    let (title, sub, icon, color) = match name {
+    let pal = current_palette();
+    let (title, icon, color) = match name {
         "win" => {
             if locked {
-                ("Win 键锁定 开启", "WIN KEY LOCKED · 避免游戏误触", "🔒", Color::from(RgbaColor { red: 239, green: 68, blue: 68, alpha: 255 }))
+                ("Win 键锁定 开启", "🔒", pal.disabled)
             } else {
-                ("Win 键锁定 关闭", "WIN KEY UNLOCKED · 恢复系统响应", "🔓", Color::from(RgbaColor { red: 16, green: 185, blue: 129, alpha: 255 }))
+                ("Win 键锁定 关闭", "🔓", pal.enabled)
             }
         }
         "fn" => {
             if locked {
-                ("Fn 键锁定 开启", "FN LOCK: ON · 首选多媒体与快捷功能", "⚡", Color::from(RgbaColor { red: 6, green: 182, blue: 212, alpha: 255 }))
+                ("Fn 键锁定 开启", "⚡", pal.balance)
             } else {
-                ("Fn 键锁定 关闭", "FN LOCK: OFF · 首选 F1-F12 标准功能", "⌨️", Color::from(RgbaColor { red: 148, green: 163, blue: 184, alpha: 255 }))
+                ("Fn 键锁定 关闭", "⌨️", pal.neutral)
             }
         }
         "touchpad" => {
             if locked {
-                ("触摸板 禁用", "TOUCHPAD DISABLED · 避免游戏误触", "🚫", Color::from(RgbaColor { red: 239, green: 68, blue: 68, alpha: 255 }))
+                ("触摸板 禁用", "🚫", pal.disabled)
             } else {
-                ("触摸板 启用", "TOUCHPAD ENABLED · 恢复触控操作", "🖱️", Color::from(RgbaColor { red: 16, green: 185, blue: 129, alpha: 255 }))
+                ("触摸板 启用", "🖱️", pal.enabled)
             }
         }
         "caps" => {
             if locked {
-                ("大写锁定 开启", "CAPS LOCK: ON · 输入大写英文字母", "🔠", Color::from(RgbaColor { red: 56, green: 189, blue: 248, alpha: 255 }))
+                ("大写锁定 开启", "🔠", pal.fan)
             } else {
-                ("大写锁定 关闭", "CAPS LOCK: OFF · 输入小写英文字母", "🔡", Color::from(RgbaColor { red: 148, green: 163, blue: 184, alpha: 255 }))
+                ("大写锁定 关闭", "🔡", pal.neutral)
             }
         }
         "num" => {
             if locked {
-                ("数字锁定 开启", "NUM LOCK: ON · 开启右侧数字小键盘", "🔢", Color::from(RgbaColor { red: 56, green: 189, blue: 248, alpha: 255 }))
+                ("数字锁定 开启", "🔢", pal.fan)
             } else {
-                ("数字锁定 关闭", "NUM LOCK: OFF · 方向与控制导航模式", "⌨️", Color::from(RgbaColor { red: 148, green: 163, blue: 184, alpha: 255 }))
+                ("数字锁定 关闭", "⌨️", pal.neutral)
             }
         }
         "scroll" => {
             if locked {
-                ("滚动锁定 开启", "SCROLL LOCK: ON · 滚动锁定已生效", "📜", Color::from(RgbaColor { red: 56, green: 189, blue: 248, alpha: 255 }))
+                ("滚动锁定 开启", "📜", pal.fan)
             } else {
-                ("滚动锁定 关闭", "SCROLL LOCK: OFF · 正常光标滚动模式", "📄", Color::from(RgbaColor { red: 148, green: 163, blue: 184, alpha: 255 }))
+                ("滚动锁定 关闭", "📄", pal.neutral)
             }
         }
         _ => {
             if locked {
-                ("锁定已生效", "LOCKED · 状态已切换", "🔒", Color::from(RgbaColor { red: 239, green: 68, blue: 68, alpha: 255 }))
+                ("锁定已生效", "🔒", pal.disabled)
             } else {
-                ("解锁已生效", "UNLOCKED · 状态已恢复", "🔓", Color::from(RgbaColor { red: 16, green: 185, blue: 129, alpha: 255 }))
+                ("解锁已生效", "🔓", pal.enabled)
             }
         }
     };
 
     ui.set_mode_title(title.into());
-    ui.set_mode_subtitle(sub.into());
     ui.set_icon_symbol(icon.into());
     ui.set_accent_color(color);
-    ui.set_accent_bg(Color::from(RgbaColor { red: 100, green: 100, blue: 100, alpha: 30 }));
+    ui.set_accent_bg(with_alpha(color, 30));
     ui.set_is_active(true);
 }
 
 fn show_device_switch_internal(ui: &OsdWindow, name: &str, enabled: bool) {
-    let (title, sub, icon, color) = match name {
+    let pal = current_palette();
+    let (title, icon, color) = match name {
         "camera" => {
             if enabled {
-                ("摄像头 开启", "CAMERA ENABLED · 镜头画面已恢复", "📷", Color::from(RgbaColor { red: 16, green: 185, blue: 129, alpha: 255 }))
+                ("摄像头 开启", "📷", pal.enabled)
             } else {
-                ("摄像头 关闭", "CAMERA DISABLED · 硬件级遮蔽防偷窥", "🚫", Color::from(RgbaColor { red: 239, green: 68, blue: 68, alpha: 255 }))
+                ("摄像头 关闭", "🚫", pal.disabled)
             }
         }
         "mic" => {
             if enabled {
-                ("麦克风 开启", "MICROPHONE UNMUTED · 拾音功能已恢复", "🎙️", Color::from(RgbaColor { red: 16, green: 185, blue: 129, alpha: 255 }))
+                ("麦克风 开启", "🎙️", pal.enabled)
             } else {
-                ("麦克风 静音", "MICROPHONE MUTED · 麦克风已闭麦", "🔇", Color::from(RgbaColor { red: 239, green: 68, blue: 68, alpha: 255 }))
+                ("麦克风 静音", "🔇", pal.disabled)
             }
         }
         "wifi" => {
             if enabled {
-                ("Wi-Fi 无线网 开启", "WI-FI ENABLED · 无线网卡已启用", "📶", Color::from(RgbaColor { red: 56, green: 189, blue: 248, alpha: 255 }))
+                ("Wi-Fi 无线网 开启", "📶", pal.fan)
             } else {
-                ("Wi-Fi 无线网 关闭", "WI-FI DISABLED · 无线网卡已停用", "✈️", Color::from(RgbaColor { red: 239, green: 68, blue: 68, alpha: 255 }))
+                ("Wi-Fi 无线网 关闭", "✈️", pal.disabled)
             }
         }
         "bluetooth" => {
             if enabled {
-                ("蓝牙 开启", "BLUETOOTH ENABLED · 蓝牙射频已开启", "ᛒ", Color::from(RgbaColor { red: 56, green: 189, blue: 248, alpha: 255 }))
+                ("蓝牙 开启", "ᛒ", pal.fan)
             } else {
-                ("蓝牙 关闭", "BLUETOOTH DISABLED · 蓝牙射频已关闭", "📵", Color::from(RgbaColor { red: 239, green: 68, blue: 68, alpha: 255 }))
+                ("蓝牙 关闭", "📵", pal.disabled)
             }
         }
         "keep_awake" => {
             if enabled {
-                ("始终保持唤醒 开启", "KEEP AWAKE: ON · 阻止系统自动休眠", "☕", Color::from(RgbaColor { red: 56, green: 189, blue: 248, alpha: 255 }))
+                ("始终保持唤醒 开启", "☕", pal.fan)
             } else {
-                ("始终保持唤醒 关闭", "KEEP AWAKE: OFF · 恢复默认睡眠策略", "💤", Color::from(RgbaColor { red: 148, green: 163, blue: 184, alpha: 255 }))
+                ("始终保持唤醒 关闭", "💤", pal.neutral)
             }
         }
         _ => {
             if enabled {
-                ("功能已开启", "FEATURE ENABLED", "✅", Color::from(RgbaColor { red: 16, green: 185, blue: 129, alpha: 255 }))
+                ("功能已开启", "✅", pal.enabled)
             } else {
-                ("功能已关闭", "FEATURE DISABLED", "❌", Color::from(RgbaColor { red: 239, green: 68, blue: 68, alpha: 255 }))
+                ("功能已关闭", "❌", pal.disabled)
             }
         }
     };
 
     ui.set_mode_title(title.into());
-    ui.set_mode_subtitle(sub.into());
     ui.set_icon_symbol(icon.into());
     ui.set_accent_color(color);
-    ui.set_accent_bg(Color::from(RgbaColor { red: 100, green: 100, blue: 100, alpha: 30 }));
+    ui.set_accent_bg(with_alpha(color, 30));
     ui.set_is_active(true);
 }
 
 fn show_kb_brightness_internal(ui: &OsdWindow, level: u8) {
-    let (title, sub, icon, color) = if level == 0 {
-        ("键盘背光 关闭".to_string(), "KEYBOARD BACKLIGHT: OFF · 背光已熄灭".to_string(), "💡", Color::from(RgbaColor { red: 148, green: 163, blue: 184, alpha: 255 }))
+    let pal = current_palette();
+    let (title, icon, color) = if level == 0 {
+        ("键盘背光 关闭".to_string(), "💡", pal.neutral)
     } else {
         let pct = match level {
             1 => 25,
@@ -539,37 +683,28 @@ fn show_kb_brightness_internal(ui: &OsdWindow, level: u8) {
             3 => 75,
             _ => 100,
         };
-        (
-            format!("键盘背光 {}%", pct),
-            format!("KEYBOARD BACKLIGHT · 亮度调节 (档位 {})", level),
-            "💡",
-            Color::from(RgbaColor { red: 56, green: 189, blue: 248, alpha: 255 }),
-        )
+        (format!("键盘背光 {}%", pct), "💡", pal.fan)
     };
 
     ui.set_mode_title(title.into());
-    ui.set_mode_subtitle(sub.into());
     ui.set_icon_symbol(icon.into());
     ui.set_accent_color(color);
-    ui.set_accent_bg(Color::from(RgbaColor { red: 100, green: 100, blue: 100, alpha: 30 }));
+    ui.set_accent_bg(with_alpha(color, 30));
     ui.set_is_active(true);
 }
 
 fn show_kb_sleep_internal(ui: &OsdWindow, seconds: u32) {
-    let (title, sub) = if seconds == 0 {
-        ("键盘背光 常亮".to_string(), "KEYBOARD TIMEOUT · 背光持续点亮不熄灭".to_string())
+    let pal = current_palette();
+    let title = if seconds == 0 {
+        "键盘背光 常亮".to_string()
     } else {
-        (
-            format!("背光 {}秒熄灭", seconds),
-            format!("KEYBOARD TIMEOUT · {}秒无操作自动熄灭", seconds),
-        )
+        format!("背光 {}秒熄灭", seconds)
     };
 
     ui.set_mode_title(title.into());
-    ui.set_mode_subtitle(sub.into());
     ui.set_icon_symbol("⏳".into());
-    ui.set_accent_color(Color::from(RgbaColor { red: 56, green: 189, blue: 248, alpha: 255 }));
-    ui.set_accent_bg(Color::from(RgbaColor { red: 56, green: 189, blue: 248, alpha: 35 }));
+    ui.set_accent_color(pal.fan);
+    ui.set_accent_bg(with_alpha(pal.fan, 35));
     ui.set_is_active(true);
 }
 
@@ -602,6 +737,16 @@ fn schedule_auto_hide_internal(ui: &OsdWindow, hwnd_shared: Arc<Mutex<Option<Saf
 /// Standalone entrypoint for --osd-companion process mode.
 /// Runs exclusively on the true Main Thread without conflicting with foreign event loops.
 pub fn run_osd_standalone() {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        #[link(name = "user32")]
+        extern "system" {
+            fn SetProcessDpiAwarenessContext(value: isize) -> i32;
+        }
+        const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: isize = -4;
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+
     std::panic::set_hook(Box::new(|info| {
         osd_log(&format!("FATAL PANIC in OSD Companion: {}", info));
     }));
@@ -619,11 +764,13 @@ pub fn run_osd_standalone() {
     let osd_weak = osd.as_weak();
     let hwnd_holder = Arc::new(Mutex::new(None));
     let cfg_shared = Arc::new(Mutex::new(NativeOsdConfig::default()));
+    let palette_shared = Arc::new(Mutex::new(OsdPalette::default()));
 
     let _ = OSD_STATE.set(OsdGlobalState {
         window: osd_weak.clone(),
         hwnd: hwnd_holder.clone(),
         config: cfg_shared.clone(),
+        palette: palette_shared,
     });
 
     // Start stdin IPC listener
@@ -656,6 +803,7 @@ pub fn run_osd_standalone() {
                     if let Some(ui) = osd_init_weak.upgrade() {
                         ui.set_osd_theme(theme.clone().into());
                         ui.set_osd_scale(parse_scale_factor(&scale));
+                        ui.set_osd_position(pos.clone().into());
                     }
                     apply_osd_window_styles(hwnd, &pos);
                     *hwnd_setter.lock().unwrap() = Some(SafeHwnd::from_hwnd(hwnd));

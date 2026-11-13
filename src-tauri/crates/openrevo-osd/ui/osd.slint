@@ -5,15 +5,24 @@ export component OsdWindow inherits Window {
     no-frame: true;
     background: transparent;
     always-on-top: true;
+    default-font-family: font_family;
 
     in-out property <bool> is_active: false;
     in-out property <string> mode_title: "狂暴模式";
-    in-out property <string> mode_subtitle: "BEAST MODE · 极致性能与功耗全开";
     in-out property <color> accent_color: #ef4444;
     in-out property <color> accent_bg: #ef444425;
     in-out property <string> icon_symbol: "⚡";
     in-out property <string> osd_theme: "pill"; // "cinema" | "fade" | "pill"
     in-out property <float> osd_scale: 1.0;     // 0.8 | 1.0 | 1.2 | 1.4
+    in-out property <string> osd_position: "top-left";
+
+    // Unified theme token overrides
+    in-out property <string> font_family: "";
+    in-out property <color> card_bg_color: #0d121cf2;
+    in-out property <color> cinema_bg_color: #000000c8;
+    in-out property <color> text_primary_color: #ffffff;
+    in-out property <length> custom_radius_sm: 4px;
+    in-out property <length> custom_radius_md: 6px;
 
     // Theme detection
     property <bool> is_cinema: osd_theme == "cinema" || osd_theme == "subtitle";
@@ -21,14 +30,16 @@ export component OsdWindow inherits Window {
     property <bool> is_pill: !is_cinema && !is_fade;
 
     card := Rectangle {
-        width: (is_cinema ? 380px : (is_fade ? 410px : 430px)) * osd_scale;
+        width: (is_cinema ? 280px : (is_fade ? 320px : 300px)) * osd_scale;
         height: (is_cinema ? 68px : (is_fade ? 74px : 76px)) * osd_scale;
-        x: (parent.width - self.width) / 2;
+        x: (osd_position == "top-left" || osd_position == "left" || osd_position == "bottom-left") ? 0px
+            : ((osd_position == "top-right" || osd_position == "right") ? (parent.width - self.width)
+            : ((parent.width - self.width) / 2));
         y: is_active ? ((parent.height - self.height) / 2) : -100px;
         opacity: is_active ? 1.0 : 0.0;
 
-        border-radius: is_pill ? (38px * osd_scale) : (is_fade ? (4px * osd_scale) : (6px * osd_scale));
-        background: is_cinema ? #000000c8 : (is_fade ? @linear-gradient(90deg, #0d121cf2 0%, #0d121c70 68%, #00000000 100%) : #0d121cf2);
+        border-radius: is_pill ? (38px * osd_scale) : (is_fade ? (custom_radius_sm * osd_scale) : (custom_radius_md * osd_scale));
+        background: is_cinema ? cinema_bg_color : (is_fade ? @linear-gradient(90deg, card_bg_color 0%, #0d121c70 68%, #00000000 100%) : card_bg_color);
         border-width: is_pill ? (1.5px * osd_scale) : 0px;
         border-color: accent_color;
         clip: true;
@@ -76,25 +87,14 @@ export component OsdWindow inherits Window {
                 }
             }
 
-            // 标题与副标题描述垂直居中
-            VerticalLayout {
-                alignment: center;
-                spacing: 3px * osd_scale;
-
-                Text {
-                    text: mode_title;
-                    font-size: (is_cinema ? 18px : 16px) * osd_scale;
-                    font-weight: 800;
-                    color: #ffffff;
-                }
-
-                Text {
-                    text: mode_subtitle;
-                    font-size: 11.5px * osd_scale;
-                    font-weight: 500;
-                    color: #94a3b8;
-                    overflow: elide;
-                }
+            // 标题垂直居中
+            Text {
+                text: mode_title;
+                font-size: (is_cinema ? 18px : 17px) * osd_scale;
+                font-weight: 800;
+                color: text_primary_color;
+                vertical-alignment: center;
+                overflow: elide;
             }
         }
     }

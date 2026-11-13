@@ -62,8 +62,17 @@ pub fn handle(action: &str, val: &serde_json::Value, ui: &MainWindow) -> bool {
             if let Some(mon) = val.get("monitor_name").and_then(|v| v.as_str()) {
                 ui.set_monitor_name(mon.into());
             }
+            if let Some(sup) = val.get("miniled_supported").and_then(|v| v.as_bool()) {
+                ui.set_miniled_supported(sup);
+            }
+            if let Some(en) = val.get("miniled_enabled").and_then(|v| v.as_bool()) {
+                ui.set_miniled_enabled(en);
+            }
             if let Some(hz) = val.get("refresh_rate").and_then(|v| v.as_i64()) {
                 ui.set_refresh_rate(hz as i32);
+            }
+            if let Some(b) = val.get("brightness").and_then(|v| v.as_i64()) {
+                ui.set_brightness(b as i32);
             }
             if let Some(r1_arr) = val.get("rates_row1").and_then(|v| v.as_array()) {
                 let r1: Vec<i32> = r1_arr.iter().filter_map(|r| r.as_i64().map(|v| v as i32)).collect();

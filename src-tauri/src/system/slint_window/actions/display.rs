@@ -9,12 +9,13 @@ pub fn handle(action: &str, val: &serde_json::Value, app: Option<&AppHandle>) ->
         "set_gpu_mode" => {
             if let Some(gm) = val.get("gpu_mode").and_then(|m| m.as_str()) {
                 let mode = gm.to_string();
+                let restart = val.get("restart").and_then(|r| r.as_bool());
                 if let Some(app) = app {
                     let gpu_state: tauri::State<crate::driver::gpu_bridge::SharedGpuBridge> = app.state();
-                    let _ = crate::commands::hardware_cmd::set_gpu_mode(app.clone(), mode, None, gpu_state);
+                    let _ = crate::commands::hardware_cmd::set_gpu_mode(app.clone(), mode, restart, gpu_state);
                 } else {
                     let gpu_state = crate::driver::gpu_bridge::get_global_gpu();
-                    let _ = crate::commands::tuning_cmd::set_gpu_mode_internal(mode, None, &gpu_state);
+                    let _ = crate::commands::tuning_cmd::set_gpu_mode_internal(mode, restart, &gpu_state);
                 }
                 sync_slint_display_state();
             }
@@ -317,6 +318,18 @@ pub fn handle(action: &str, val: &serde_json::Value, app: Option<&AppHandle>) ->
             let prof_id = val.get("profile_id").or_else(|| val.get("profile_name")).and_then(|p| p.as_str()).unwrap_or("default_native").to_string();
             tauri::async_runtime::spawn(async move {
                 let _ = crate::commands::display_cmd::apply_color_profile(prof_id, None).await;
+                sync_slint_display_state();
+            });
+            true
+        }
+        "set_miniled_status" | "toggle_miniled" => {
+            let next_val = if let Some(en) = val.get("enabled").and_then(|v| v.as_bool()) {
+                en
+            } else {
+                !crate::commands::display_cmd::get_miniled_status().unwrap_or(false)
+            };
+            tauri::async_runtime::spawn(async move {
+                let _ = crate::commands::display_cmd::set_miniled_status(next_val).await;
                 sync_slint_display_state();
             });
             true

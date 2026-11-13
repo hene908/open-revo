@@ -146,7 +146,27 @@ pub fn collect_hardware_state(
     };
 
     let cpu = get_cpu_monitor();
-    let cpu_temp = cpu.get_temp();
+    let cpu_temp = {
+        let manifest_has_temp = crate::hal::declarative::load_matched_manifest()
+            .map(|m| m.actions.contains_key("read_cpu_temp"))
+            .unwrap_or(false);
+
+        if manifest_has_temp {
+            let hal = crate::hal::get_hardware_driver();
+            if let Ok(t) = hal.read_cpu_temp() {
+                if t > 0 && t < 125 {
+                    cpu.set_temp(t as i32);
+                    t as i32
+                } else {
+                    cpu.get_temp()
+                }
+            } else {
+                cpu.get_temp()
+            }
+        } else {
+            cpu.get_temp()
+        }
+    };
     let oem_running = process::is_oem_service_running();
     let oem_installed = process::is_oem_installed();
     let is_intel_13_14_gen = cpu.is_intel_13_14_gen();
@@ -256,7 +276,19 @@ pub fn restart_app(app: AppHandle) -> Result<(), String> {
     crate::log_info!("APP", "Restarting application...");
     crate::system::tray::IS_EXPLICIT_EXIT.store(true, std::sync::atomic::Ordering::SeqCst);
     if let Ok(exe) = std::env::current_exe() {
-        let _ = std::process::Command::new(exe).spawn();
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg(format!("--relaunch-wait={}", std::process::id()))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0000_0008 | 0x0000_0200);
+        }
+        if let Err(e) = cmd.spawn() {
+            crate::log_error!("APP", "Failed to spawn relaunch process {:?}: {}", exe, e);
+        }
     }
     app.exit(0);
     Ok(())
@@ -1479,6 +1511,19 @@ pub fn set_custom_plugin_enabled(id: String, enabled: bool) -> Result<bool, Stri
 }
 
 pub fn find_plugin_dir(plugin_id: &str) -> std::path::PathBuf {
+    // 1. In dev/test or portable repo environments, prioritize latest plugins_sample
+    for base_cand in [std::path::PathBuf::from("."), std::path::PathBuf::from("..")] {
+        let sample_slint = base_cand.join("plugins_sample").join("slint").join(plugin_id);
+        if sample_slint.exists() {
+            return sample_slint;
+        }
+        let sample_web = base_cand.join("plugins_sample").join("webview2").join(plugin_id);
+        if sample_web.exists() {
+            return sample_web;
+        }
+    }
+
+    // 2. Installed plugins in user config dir
     let base = crate::system::config::get_config_dir().join("plugins");
     let direct = base.join(plugin_id);
     if direct.exists() {
@@ -1498,16 +1543,6 @@ pub fn find_plugin_dir(plugin_id: &str) -> std::path::PathBuf {
                 }
             }
         }
-    }
-
-    // Fallback: check repository sample directories
-    let sample_slint = std::path::Path::new("plugins_sample").join("slint").join(plugin_id);
-    if sample_slint.exists() {
-        return sample_slint;
-    }
-    let sample_web = std::path::Path::new("plugins_sample").join("webview2").join(plugin_id);
-    if sample_web.exists() {
-        return sample_web;
     }
 
     direct

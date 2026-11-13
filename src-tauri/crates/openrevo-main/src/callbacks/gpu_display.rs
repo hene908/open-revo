@@ -4,8 +4,11 @@ use crate::MainWindow;
 pub fn register(window: &MainWindow, ui_weak: slint::Weak<MainWindow>) {
     // GPU mode
     let ui_cb = ui_weak.clone();
-    window.on_gpu_mode_clicked(move |mode| {
-        ipc::send_action_to_host("set_gpu_mode", serde_json::json!({ "gpu_mode": mode.as_str() }));
+    window.on_gpu_mode_clicked(move |mode, restart| {
+        ipc::send_action_to_host("set_gpu_mode", serde_json::json!({
+            "gpu_mode": mode.as_str(),
+            "restart": restart,
+        }));
         if let Some(ui) = ui_cb.upgrade() {
             ui.set_gpu_mode(mode);
         }
@@ -39,6 +42,16 @@ pub fn register(window: &MainWindow, ui_weak: slint::Weak<MainWindow>) {
         ipc::send_action_to_host("set_brightness", serde_json::json!({ "brightness": b }));
         if let Some(ui) = ui_cb.upgrade() {
             ui.set_brightness(b);
+        }
+    });
+
+    // Mini-LED local dimming toggle
+    let ui_miniled = ui_weak.clone();
+    window.on_toggle_miniled(move || {
+        if let Some(ui) = ui_miniled.upgrade() {
+            let next = !ui.get_miniled_enabled();
+            ui.set_miniled_enabled(next);
+            ipc::send_action_to_host("set_miniled_status", serde_json::json!({ "enabled": next }));
         }
     });
 

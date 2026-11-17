@@ -157,10 +157,10 @@ pub fn apply_ec_hardware_mode(ui_mode: u8) {
             }
 
             // 5. Dynamic GPU DB & TGP (Eco / Quiet Baseline)
-            // Neutralize any GPU overclocking offsets ONLY if OpenRevo custom mode had super_perf enabled
+            // Neutralize any GPU overclocking offsets if previously applied
             if crate::driver::gpu_bridge::is_nvidia_dgpu_available() {
                 let cfg = crate::system::config::load_config();
-                if cfg.custom_profile.gpu_super_perf {
+                if cfg.custom_profile.gpu_super_perf || cfg.turbo_oc_enabled {
                     let _ = crate::driver::nvapi::reset_gpu_clock_offsets();
                     let gpu = crate::driver::gpu_bridge::get_global_gpu();
                     gpu.lock().set_clock_offsets(0, 0);
@@ -231,10 +231,10 @@ pub fn apply_ec_hardware_mode(ui_mode: u8) {
             }
 
             // 5. Dynamic GPU DB & TGP (Full factory Base TGP and DB capacity, discrete GPU only)
-            // Neutralize any GPU overclocking offsets ONLY if OpenRevo custom mode had super_perf enabled
+            // Neutralize any GPU overclocking offsets if previously applied
             if crate::driver::gpu_bridge::is_nvidia_dgpu_available() {
                 let cfg = crate::system::config::load_config();
-                if cfg.custom_profile.gpu_super_perf {
+                if cfg.custom_profile.gpu_super_perf || cfg.turbo_oc_enabled {
                     let _ = crate::driver::nvapi::reset_gpu_clock_offsets();
                     let gpu = crate::driver::gpu_bridge::get_global_gpu();
                     gpu.lock().set_clock_offsets(0, 0);
@@ -315,10 +315,20 @@ pub fn apply_ec_hardware_mode(ui_mode: u8) {
             }
 
             // 5. Dynamic GPU DB & TGP (Full factory Base TGP and DB capacity, discrete GPU only)
-            // Neutralize any GPU overclocking offsets ONLY if OpenRevo custom mode had super_perf enabled
+            // Apply or reset GPU overclocking offsets based on turbo_oc_enabled
             if crate::driver::gpu_bridge::is_nvidia_dgpu_available() {
                 let cfg = crate::system::config::load_config();
-                if cfg.custom_profile.gpu_super_perf {
+                if cfg.turbo_oc_enabled {
+                    let core = cfg.gpu_oc_core_mhz.clamp(0, 250);
+                    let mem = cfg.gpu_oc_mem_mhz.clamp(0, 1000);
+                    if let Err(e) = crate::driver::nvapi::set_gpu_clock_offsets(core, mem) {
+                        crate::log_warn!("POWER_MODE", "Turbo Mode: Failed to apply GPU OC offsets ({}, {}): {}", core, mem, e);
+                    } else {
+                        let gpu = crate::driver::gpu_bridge::get_global_gpu();
+                        gpu.lock().set_clock_offsets(core, mem);
+                        crate::log_info!("POWER_MODE", "Turbo Mode: Applied GPU OC offsets: core=+{}MHz, mem=+{}MHz", core, mem);
+                    }
+                } else {
                     let _ = crate::driver::nvapi::reset_gpu_clock_offsets();
                     let gpu = crate::driver::gpu_bridge::get_global_gpu();
                     gpu.lock().set_clock_offsets(0, 0);
@@ -408,9 +418,13 @@ pub fn apply_ec_hardware_mode(ui_mode: u8) {
                 }
             }
             
-            // Read saved user custom profile
+            // Read saved user custom profile: prioritize matching active profile from list_profiles to avoid cache drift
             let cfg = crate::system::config::load_config();
-            let profile = cfg.custom_profile;
+            let profile = crate::system::config::list_profiles()
+                .into_iter()
+                .find(|p| p.id == cfg.active_profile_id)
+                .map(|p| p.profile)
+                .unwrap_or(cfg.custom_profile);
 
             crate::log_info!(
                 "CUSTOM_TRACE",
@@ -422,6 +436,13 @@ pub fn apply_ec_hardware_mode(ui_mode: u8) {
             );
 
             let gpu_caps = crate::driver::gpu_bridge::probe_gpu_tuning_capabilities();
+
+            // 0. Explicitly assert Custom Mode hardware flag FIRST (ADDR_CUSTOM_MODE = 65)
+            // CRITICAL: Must be asserted BEFORE writing ADDR_TRIGGER_BYTE or ADDR_MODE_INDEX!
+            // If ADDR_CUSTOM_MODE is left at 64 (from previous Balance/Turbo mode) when TRIGGER_BYTE fires with
+            // MODE_INDEX = 0x10, the EC firmware interprets it as factory Turbo mode and forcibly overwrites
+            // custom PL1/PL2/PL4 with factory Turbo presets from ROM table!
+            wmi_ec::set_custom_mode_ec(true);
 
             // Physical Mode & Super Performance:
             // - Super Performance (HWOC): Follows user preference (profile.gpu_super_perf).
@@ -506,14 +527,13 @@ pub fn apply_ec_hardware_mode(ui_mode: u8) {
                 );
             }
 
-            // 3. Hardware Trigger Latch: Assert Trigger Byte (preserve Bit 4 USB Charging)
+            // 3. Custom Mode Hardware Switch & Fan strategies / Sensitivity
+            wmi_ec::set_fan_ramp_rate(profile.fan_ramp_rate, profile.fan_ramp_speed_ms);
+
+            // 4. Hardware Trigger Latch: Assert Trigger Byte (preserve Bit 4 USB Charging)
             // Latch all CPU & GPU power/thermal configurations into EC/SMM state machine
             let cur_trig = wmi_ec::wmi_read_ec(wmi_ec::ADDR_TRIGGER_BYTE).unwrap_or(0);
             wmi_ec::wmi_write_ec(wmi_ec::ADDR_TRIGGER_BYTE, (cur_trig & 0x10) | 0x20);
-
-            // 4. Custom Mode Hardware Switch & Fan strategies / Sensitivity
-            wmi_ec::set_custom_mode_ec(true);
-            wmi_ec::set_fan_ramp_rate(profile.fan_ramp_rate, profile.fan_ramp_speed_ms);
             
             // If custom fan isolated output / curve is enabled in profile, build and apply user curve; otherwise default to turbo fan table
             // If Fan Boost is active, do not latch curve into EC RAM to preserve full speed!

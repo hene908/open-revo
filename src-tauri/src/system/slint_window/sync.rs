@@ -70,6 +70,17 @@ pub fn sync_slint_telemetry(state: &crate::commands::system_cmd::HardwareState) 
         (supported_rates.clone(), Vec::new())
     };
 
+    let mut sorted_rates = supported_rates.clone();
+    sorted_rates.sort();
+    sorted_rates.dedup();
+    let min_refresh_rate = sorted_rates.first().copied().unwrap_or(60) as i32;
+    let max_refresh_rate = sorted_rates.last().copied().unwrap_or(240) as i32;
+    let intermediate_rates: Vec<i32> = if sorted_rates.len() > 2 {
+        sorted_rates[1..sorted_rates.len() - 1].iter().map(|&r| r as i32).collect()
+    } else {
+        Vec::new()
+    };
+
     let (live_battery, live_ac, _) = crate::commands::power_cmd::get_live_power_status();
     let has_secondary_monitor = state.monitors.len() > 1;
     let primary_monitor_name = if !state.monitors.is_empty() { state.monitors[0].friendly_name.clone() } else { "内置主屏".to_string() };
@@ -102,6 +113,9 @@ pub fn sync_slint_telemetry(state: &crate::commands::system_cmd::HardwareState) 
         "monitor_name": monitor_name,
         "rates_row1": rates_row1,
         "rates_row2": rates_row2,
+        "min_refresh_rate": min_refresh_rate,
+        "max_refresh_rate": max_refresh_rate,
+        "intermediate_rates": intermediate_rates,
         "has_secondary_monitor": has_secondary_monitor,
         "primary_monitor_name": primary_monitor_name,
         "secondary_monitor_name": secondary_monitor_name,
@@ -141,10 +155,17 @@ pub fn sync_slint_tuning_state() {
     let profile = current_preset.as_ref().map(|p| &p.profile).unwrap_or(&cfg.custom_profile);
     let preset_name = current_preset.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| "静音狂暴".to_string());
 
+    let single_fan_channel = manifest.as_ref()
+        .map(|m| !m.capabilities.fan_independent_channels)
+        .unwrap_or(false);
     let fan_boost_mode_cap = manifest.as_ref().and_then(|m| m.capabilities.fan_boost_mode.clone()).unwrap_or_else(|| "none".to_string());
     let min_duty_floor: u8 = if fan_boost_mode_cap == "direct_rpm_clamp" { 22 } else { 0 };
     let cpu_curve = normalize_fan_curve_8(&profile.cpu_fan_curve, min_duty_floor);
-    let gpu_curve = normalize_fan_curve_8(&profile.gpu_fan_curve, min_duty_floor);
+    let gpu_curve = if single_fan_channel {
+        cpu_curve.clone()
+    } else {
+        normalize_fan_curve_8(&profile.gpu_fan_curve, min_duty_floor)
+    };
     let effective_temp_wall_max = bounds
         .temp_wall_max
         .max((profile.cpu_temp_target as i32).min(bounds.max_temp_wall));
@@ -153,10 +174,32 @@ pub fn sync_slint_tuning_state() {
     let clamped_pl2 = (profile.cpu_pl2_watts as i32).clamp(bounds.min_pl, bounds.pl2_max);
     let clamped_pl4 = (profile.cpu_pl4_watts as i32).clamp(bounds.min_pl + bounds.pl4_margin, bounds.pl4_max);
 
-    let base_tgp = crate::system::power_mode::get_cached_factory_power_presets().map(|fp| fp.base_tgp).unwrap_or(150);
+    let is_pure_igpu = crate::commands::power_cmd::is_thin_and_light_or_pure_igpu()
+        || !crate::driver::gpu_bridge::is_nvidia_dgpu_available();
+    let fp = crate::system::power_mode::get_factory_power_presets(!is_pure_igpu);
     let is_clamped = crate::driver::bld_driver_mgr::is_bld_fan_clamped();
 
     let gpu_caps = crate::driver::gpu_bridge::probe_gpu_tuning_capabilities();
+    let base_tgp = if fp.base_tgp > 0 {
+        fp.base_tgp as u32
+    } else if gpu_caps.base_tgp_max_watts > 0 {
+        gpu_caps.base_tgp_max_watts
+    } else {
+        115
+    };
+    let factory_base_tgp = if fp.base_tgp > 0 {
+        fp.base_tgp as u32
+    } else {
+        base_tgp
+    };
+    let factory_max_db = if fp.max_db > 0 {
+        fp.max_db as u32
+    } else if gpu_caps.max_db_watts > 0 {
+        gpu_caps.max_db_watts
+    } else {
+        25
+    };
+
     let gpu_power_tuning_mode = manifest.as_ref()
         .and_then(|m| m.capabilities.gpu_power_tuning_mode.clone())
         .unwrap_or_else(|| if is_bld { "mode_locked".to_string() } else { "none".to_string() });
@@ -251,14 +294,22 @@ pub fn sync_slint_tuning_state() {
         "ctgp_enabled": profile.gpu_ctgp_enabled,
         "max_db_watts": max_db_watts,
         "is_mode_locked": is_mode_locked,
+        "factory_office_pl1": fp.office_pl1,
+        "factory_balance_pl1": fp.balance_pl1,
+        "factory_turbo_pl1": fp.turbo_pl1,
+        "factory_base_tgp": factory_base_tgp,
+        "factory_max_db": factory_max_db,
+        "factory_hardware_read": fp.hardware_read,
+        "is_declarative": is_mode_locked,
         "fan_custom_curve": fan_custom_curve,
         "fan_boost_mode": fan_boost_mode,
         "is_direct_clamp": is_direct_clamp,
+        "single_fan_channel": single_fan_channel,
         "min_duty": min_duty,
         "smooth_transition": profile.fan_ramp_rate,
         "smooth_time": format!("{}ms", profile.fan_ramp_speed_ms),
-        "fan_isolated_output": profile.fan_isolated_output,
-        "fan_linked": profile.fan_curve_linked,
+        "fan_isolated_output": if single_fan_channel { false } else { profile.fan_isolated_output },
+        "fan_linked": if single_fan_channel { true } else { profile.fan_curve_linked },
         "cpu_curve": cpu_curve,
         "gpu_curve": gpu_curve,
         "bld_rpm_cap": 5800,
@@ -287,6 +338,17 @@ pub fn sync_slint_display_state() {
         (supported_rates[..mid].to_vec(), supported_rates[mid..].to_vec())
     } else {
         (supported_rates.clone(), Vec::new())
+    };
+
+    let mut sorted_rates = supported_rates.clone();
+    sorted_rates.sort();
+    sorted_rates.dedup();
+    let min_refresh_rate = sorted_rates.first().copied().unwrap_or(60) as i32;
+    let max_refresh_rate = sorted_rates.last().copied().unwrap_or(240) as i32;
+    let intermediate_rates: Vec<i32> = if sorted_rates.len() > 2 {
+        sorted_rates[1..sorted_rates.len() - 1].iter().map(|&r| r as i32).collect()
+    } else {
+        Vec::new()
     };
     let has_secondary_monitor = monitors.len() > 1;
     let primary_monitor_name = if !monitors.is_empty() { monitors[0].friendly_name.clone() } else { "内置主屏".to_string() };
@@ -335,6 +397,9 @@ pub fn sync_slint_display_state() {
         "refresh_rate": curr_hz,
         "rates_row1": rates_row1,
         "rates_row2": rates_row2,
+        "min_refresh_rate": min_refresh_rate,
+        "max_refresh_rate": max_refresh_rate,
+        "intermediate_rates": intermediate_rates,
         "has_secondary_monitor": has_secondary_monitor,
         "primary_monitor_name": primary_monitor_name,
         "secondary_monitor_name": secondary_monitor_name,

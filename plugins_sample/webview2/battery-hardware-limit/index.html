@@ -692,7 +692,7 @@
         <div class="header-title-box">
           <h1>
             电池硬件限充守护者
-            <span class="header-badge" id="badgeVersion">v2.4.0 Pin-Safe</span>
+
           </h1>
           <div class="header-desc">
             底层硬件级截断充电回路 · 自适应 0x04/0x05 门控 · 持续常驻心跳锁定 · 彻底杜绝电池鼓包与过充
@@ -841,7 +841,7 @@
       <div class="action-row">
         <div class="action-desc" id="actionDescText">
           <b>运行机制</b>：采用<b>门控持续保持法 (Pin & Keep-Alive)</b>，智能自适应探测开门平台码 (0x04 /
-          0x05)，写入目标限值并由后台常驻守护。绝不在写入后盲目恢复原厂码（恢复原厂码将导致同方固件立即撤销限值并清零）。
+          0x05)。基线守护规则已在 <code>manifest.json</code> 中声明式注册，关掉窗口或开机常驻托盘时由微内核以 0MB Webview 内存自主接管。
         </div>
         <div class="action-buttons">
           <button id="btnCancel" class="btn btn-danger" onclick="triggerCancelLimit()">
@@ -1166,35 +1166,107 @@
     }
 
     async function syncWatcherToHost() {
+      // 官方原子化守护架构范式：
+      // 1. 前端是业务编译器：根据当前探测的寄存器和用户选择的工作模式（脉冲存储法 vs 持续锁定法），
+      //    编译为标准通用 Watcher 流水线规则。
+      // 2. 调用通用的 set_plugin_watchers，微内核自动落盘至插件沙盒 plugin_storage/battery-hardware-limit/watchers.json，
+      //    并立即在运行态热更新生效。
+      // 3. 开机无需启动前端，微内核启动时直接从沙盒加载已编译好的 watchers.json 脱水运行！
       try {
-        const watcherDef = {
-          id: 'battery-limit-ac-reconnect-guard',
-          name: '微内核电源重连限充断言守护',
-          plugin_id: 'battery-hardware-limit',
-          enabled: Boolean(STATE.isLimitActive),
-          cooldown_ms: 3000,
-          condition: {
-            type: 'power_event',
-            event: 'ac_connected'
-          },
-          actions: [
-            {
-              action: 'call_command',
-              command: 'set_battery_limit',
-              args: {
-                limit: STATE.currentTarget
-              }
-            }
-          ]
-        };
+        const isEnabled = Boolean(STATE.isLimitActive) && STATE.currentTarget < 100;
+        const gateVal = STATE.activeGateVal || 4;
+        const watchers = [];
 
-        if (window.OpenRevo && typeof window.OpenRevo.registerWatcher === 'function') {
-          await window.OpenRevo.registerWatcher(watcherDef);
-        } else if (window.parent && window.parent.__OPENREVO_BRIDGE__ && typeof window.parent.__OPENREVO_BRIDGE__.registerWatcher === 'function') {
-          await window.parent.__OPENREVO_BRIDGE__.registerWatcher(watcherDef);
-        } else {
-          await rpc('register_custom_watcher', { watcher: watcherDef });
+        if (isEnabled) {
+          if (STATE.mode === 'pulse') {
+            // 模式 A：脉冲存储法 (事件驱动触发，采用原生 pulse_write 复合原子动作)
+            watchers.push({
+              id: 'battery-limit-pulse-guard',
+              name: '电池脉冲锁存守护 (事件驱动)',
+              plugin_id: 'battery-hardware-limit',
+              enabled: true,
+              cooldown_ms: 1000,
+              when: {
+                type: 'any',
+                conditions: [
+                  { type: 'startup' },
+                  { type: 'power_event', event: 'ac_connected' }
+                ]
+              },
+              actions: [
+                {
+                  action: 'raw_ec_write',
+                  address: STATE.limitReg,
+                  value: STATE.currentTarget
+                },
+                {
+                  action: 'pulse_write',
+                  address: STATE.gateReg,
+                  active: gateVal,
+                  restore: 0,
+                  delay_ms: Number(STATE.pulseHoldMs) || 200
+                }
+              ]
+            });
+          } else {
+            // 模式 B：持续锁定法 (开机设定上限 + 周期性门控心跳)
+            watchers.push({
+              id: 'battery-limit-startup-guard',
+              name: '微内核开机与电源接入基线设定',
+              plugin_id: 'battery-hardware-limit',
+              enabled: true,
+              cooldown_ms: 1000,
+              when: {
+                type: 'any',
+                conditions: [
+                  { type: 'startup' },
+                  { type: 'power_event', event: 'ac_connected' }
+                ]
+              },
+              actions: [
+                {
+                  action: 'raw_ec_write',
+                  address: STATE.limitReg,
+                  value: STATE.currentTarget
+                },
+                {
+                  action: 'raw_ec_write',
+                  address: STATE.gateReg,
+                  value: gateVal
+                }
+              ]
+            });
+
+            watchers.push({
+              id: 'battery-limit-gate-keepalive',
+              name: '门控持续保持心跳 (Pin & Keep-Alive)',
+              plugin_id: 'battery-hardware-limit',
+              enabled: true,
+              cooldown_ms: 0,
+              when: {
+                type: 'interval',
+                every_ms: Number(STATE.keepaliveIntervalMs) || 4000
+              },
+              actions: [
+                {
+                  action: 'raw_ec_write',
+                  address: STATE.gateReg,
+                  value: gateVal
+                }
+              ]
+            });
+          }
         }
+
+        // 统一提交给微内核
+        if (window.OpenRevo && typeof window.OpenRevo.setPluginWatchers === 'function') {
+          await window.OpenRevo.setPluginWatchers('battery-hardware-limit', watchers);
+        } else if (window.parent && window.parent.__OPENREVO_BRIDGE__ && typeof window.parent.__OPENREVO_BRIDGE__.setPluginWatchers === 'function') {
+          await window.parent.__OPENREVO_BRIDGE__.setPluginWatchers('battery-hardware-limit', watchers);
+        } else {
+          await rpc('set_plugin_watchers', { pluginId: 'battery-hardware-limit', watchers });
+        }
+        console.log('[BatteryLimit] 成功原子化同步 Watcher 规则至微内核沙盒:', watchers);
       } catch (e) {
         console.warn('[BatteryLimit] 同步 Watcher 到宿主事件中心失败:', e);
       }
@@ -1215,6 +1287,11 @@
       const time = new Date().toTimeString().split(' ')[0];
       box.textContent += `\n[${time}] ${msg}`;
       box.scrollTop = box.scrollHeight;
+      try {
+        if (window.OpenRevo && typeof window.OpenRevo.log === 'function') {
+          window.OpenRevo.log(msg, 'UI');
+        }
+      } catch (_) { }
     }
 
     function showToast(msg) {

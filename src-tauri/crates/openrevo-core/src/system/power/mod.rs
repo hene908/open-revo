@@ -312,7 +312,9 @@ pub fn spawn_hardware_state_restore(ec_for_restore: crate::driver::ec_bridge::Sh
                 }
             }
 
-            ec.set_battery_limit(cfg.battery_limit);
+            if cfg.battery_limit < 95 || cfg.battery_hardware_limit_enabled {
+                ec.set_battery_limit(cfg.battery_limit);
+            }
             ec.set_fan_boost(cfg.fan_boost);
         }
 
@@ -599,7 +601,7 @@ pub fn restore_ec_power_options(cfg: &crate::system::config::AppConfig) {
         );
         return;
     }
-    if !crate::driver::wmi_ec::is_acpi_driver_available() {
+    if !crate::driver::wmi_ec::is_acpi_driver_available() && !crate::hal::platform_probe::is_tongfang_family() {
         return;
     }
     for (option, enable) in [

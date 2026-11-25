@@ -154,6 +154,7 @@ pub fn sync_slint_tuning_state() {
     let current_preset = presets.iter().find(|p| p.id == active_id).cloned().or_else(|| presets.first().cloned());
     let profile = current_preset.as_ref().map(|p| &p.profile).unwrap_or(&cfg.custom_profile);
     let preset_name = current_preset.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| "静音狂暴".to_string());
+    let is_builtin = current_preset.as_ref().map(|p| p.is_builtin).unwrap_or_else(|| active_id.starts_with("preset_"));
 
     let single_fan_channel = manifest.as_ref()
         .map(|m| !m.capabilities.fan_independent_channels)
@@ -252,6 +253,7 @@ pub fn sync_slint_tuning_state() {
         "cpu_supports_fppt": cpu_supports_fppt,
         "is_bld": is_bld,
         "active_preset_name": preset_name,
+        "active_preset_is_builtin": is_builtin,
         "preset_ids": preset_ids,
         "preset_names": preset_names,
         "temp_wall": clamped_temp_wall,
@@ -368,11 +370,18 @@ pub fn sync_slint_display_state() {
         caps.supports_igpu_only
     };
     let is_intel = caps.platform != "amd";
+    let is_thin_and_light = crate::commands::power_cmd::is_thin_and_light_or_pure_igpu();
     let cfg = crate::system::config::load_config();
+    let effective_gpu_mode = if is_thin_and_light {
+        "igpu"
+    } else {
+        &cfg.gpu_mode
+    };
 
     send_slint_ipc_message(serde_json::json!({
         "action": "sync_display_state",
-        "gpu_mode": cfg.gpu_mode,
+        "gpu_mode": effective_gpu_mode,
+        "is_thin_and_light": is_thin_and_light,
         "is_tri_mode": is_tri_mode,
         "is_safety_locked": caps.is_safety_locked,
         "is_intel": is_intel,
@@ -608,6 +617,20 @@ pub fn sync_slint_lighting_state() {
         "is_four_zone": is_four_zone,
         "is_single_zone": is_single_zone,
         "is_single_color": is_single_color,
+    }));
+
+    let status = lm.get_runtime_status();
+    send_slint_ipc_message(serde_json::json!({
+        "action": "sync_lighting_topology_status",
+        "override_enabled": status.hardware_override.enabled,
+        "ov_keyboard": status.hardware_override.keyboard,
+        "ov_front_bar": status.hardware_override.front_bar,
+        "ov_ambient": status.hardware_override.ambient,
+        "ov_logo": status.hardware_override.logo,
+        "base_keyboard": status.detected_baseline.keyboard,
+        "base_front_bar": status.detected_baseline.front_bar,
+        "base_ambient": status.detected_baseline.ambient,
+        "base_logo": status.detected_baseline.logo,
     }));
 }
 
